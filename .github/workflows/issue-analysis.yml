@@ -1,0 +1,119 @@
+name: AI Issue Analysis
+
+on:
+  issues:
+    types: [opened, closed, reopened]
+  issue_comment:
+    types: [created]
+
+run-name: 'Issue #${{ github.event.issue.number }}: ${{ github.event.issue.title }}'
+
+jobs:
+  issue_analysis:
+    permissions:
+      issues: write
+      models: read
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository (main branch and 1 last commits)
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 1
+        ref: main
+
+    - name: Escape markdown characters
+      id: escape
+      continue-on-error: true
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_ACTION: ${{ github.event.action }}
+        ISSUE_TITLE: ${{ github.event.issue.title }}
+        COMMENT_BODY: ${{ github.event.comment.body }}
+        ISSUE_BODY: ${{ github.event.issue.body }}
+      run: |
+        ACTION=$(echo "$EVENT_NAME $EVENT_ACTION" | sed 's/_/\\_/g')
+        TITLE=$(echo "$ISSUE_TITLE" | sed 's/_/\\_/g')
+        if [ -n "$COMMENT_BODY" ]; then
+          DESCRIPTION=$(echo "$COMMENT_BODY" | sed 's/_/\\_/g')
+        else
+          DESCRIPTION=$(echo "$ISSUE_BODY" | sed 's/_/\\_/g')
+        fi
+        {
+          echo "action<<EOF"
+          echo "$ACTION"
+          echo "EOF"
+          
+          echo "title<<EOF"
+          echo "$TITLE"
+          echo "EOF"
+          
+          echo "description<<EOF"
+          echo "$DESCRIPTION"
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Send message to Telegram
+      id: tg_msg
+      uses: appleboy/telegram-action@master
+      continue-on-error: true
+      with:
+        token: ${{ secrets.TELEGRAM_API_TOKEN }}
+        to: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        debug: true
+        format: markdown
+        message: |
+          🔔 **Action**: ${{ steps.escape.outputs.action }} [#${{ github.event.issue.number }}](${{ github.event.comment.html_url || github.event.issue.html_url }})
+
+          📁 **Repository**: ${{ github.repository }}
+          👤 **From user**: ${{ github.actor }}
+
+          📌 **Title**: ${{ steps.escape.outputs.title || github.event.issue.title }}
+          💬 **Description**:
+          ${{ steps.escape.outputs.description }}
+
+    - name: Send message to Telegram if there is an error sending the description
+      uses: appleboy/telegram-action@master
+      if: failure()
+      continue-on-error: true
+      with:
+        token: ${{ secrets.TELEGRAM_API_TOKEN }}
+        to: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        debug: true
+        format: markdown
+        message: |
+          🔔 **Action**: ${{ steps.escape.outputs.action }} [#${{ github.event.issue.number }}](${{ github.event.comment.html_url || github.event.issue.html_url }})
+
+          📁 **Repository**: ${{ github.repository }}
+          👤 **From user**: ${{ github.actor }}
+
+          📌 **Title**: ${{ steps.escape.outputs.title || github.event.issue.title }}
+
+    - name: Generate report using AI
+      if: ${{ github.event_name == 'issues' && github.event.action == 'opened'}}
+      id: ai_query
+      uses: actions/ai-inference@v2
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        endpoint: https://models.github.ai/inference
+        model: gpt-4.1
+        max-tokens: 1024
+        system-prompt: |
+          You are a developer assistant.
+          Your job is to analyze issues on GitHub and suggest solutions.
+          Your responses should be brief and in English.
+        prompt: |
+          Title: ${{ github.event.issue.title }}
+          Description: ${{ github.event.issue.body }}
+
+    - name: Post comment to Issue from AI
+      if: ${{ github.event_name == 'issues' && github.event.action == 'opened' && steps.ai_query.outputs.response != '' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        ISSUE_NUMBER: ${{ github.event.issue.number }}
+        AI_RESPONSE: ${{ steps.ai_query.outputs.response }}
+      run: |-
+        gh issue comment "$ISSUE_NUMBER" --body "### AI Issue Analysis
+
+        $AI_RESPONSE"
